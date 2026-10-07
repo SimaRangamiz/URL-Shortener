@@ -11,7 +11,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8080", "Server listen address")
-	baseURL := flag.String("", "http://localhost:8080", "")
+	baseURL := flag.String("base", "http://localhost:8080", "Base URL for short links")
 	flag.Parse()
 
 	memStore := store.NewMemoryStore()

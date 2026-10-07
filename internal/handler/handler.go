@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-
+	"errors"
+	"time"
+	
 	"url-shortener/internal/link"
 	"url-shortener/internal/store"
 )
@@ -23,6 +25,15 @@ type Handler struct {
 	baseURL string
 }
 
+type LinkMetadataResponse struct {
+	URL       string `json:"url"`
+	CreatedAt string `json:"created_at"` 
+}
+
+type ErrorResponse struct {
+	Error string `json:"error"`
+}
+
 func NewHandler(s store.Store, baseURL string) *Handler {
 	return &Handler{
 		store:   s,
@@ -30,27 +41,37 @@ func NewHandler(s store.Store, baseURL string) *Handler {
 	}
 }
 
+func (h *Handler) jSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(ErrorResponse{Error: msg})
+}
+
 func (h *Handler) Shorten(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		h.jSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	var req ShortenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
-		http.Error(w, `{"error":"invalid JSON or missing url"}`, http.StatusBadRequest)
+		h.jSONError(w, http.StatusBadRequest, "invalid JSON or missing url")
 		return
 	}
 
 	normalizedURL, err := link.Validate(req.URL)
 	if err != nil {
-		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+		if errors.Is(err, link.ErrInvalidURL) {
+			h.jSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.jSONError(w, http.StatusBadRequest, "invalid URL input")
 		return
 	}
 
 	code, err := h.store.GetCodeOrShorten(normalizedURL)
 	if err != nil {
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		h.jSONError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
 
@@ -72,15 +93,52 @@ func (h *Handler) Router(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasPrefix(path, "api/v1/links/") {
+		code := strings.TrimPrefix(path, "api/v1/links/")
+		if code == "" {
+			h.jSONError(w, http.StatusNotFound, "missing code")
+			return
+		}
+		h.GetMetadata(w, r, code)
+		return
+	}
+
 	if r.Method == http.MethodGet && path != "" {
 		longURL, exists := h.store.GetURL(path)
 		if !exists {
-			http.NotFound(w, r)
+			h.jSONError(w, http.StatusNotFound, "link not found")
 			return
 		}
 		http.Redirect(w, r, longURL, http.StatusFound)
 		return
 	}
 
-	http.NotFound(w, r)
+	h.jSONError(w, http.StatusNotFound, "route not found")
+}
+
+
+func (h *Handler) GetMetadata(w http.ResponseWriter, r *http.Request, code string) {
+	if r.Method != http.MethodGet {
+		h.jSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	l, err := h.store.GetLink(code)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			h.jSONError(w, http.StatusNotFound, "link not found")
+			return
+		}
+		h.jSONError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+
+	resp := LinkMetadataResponse{
+		URL:       l.OriginalURL,
+		CreatedAt: l.CreatedAt.Format(time.RFC3339),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
 }

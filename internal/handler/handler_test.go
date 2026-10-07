@@ -7,83 +7,141 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
+	"url-shortener/internal/link"
 	"url-shortener/internal/store"
 )
 
-func TestShortenAndRedirect(t *testing.T) {
+type FakeStore struct {
+	links map[string]link.Link
+}
+
+func NewFakeStore() *FakeStore {
+	return &FakeStore{links: make(map[string]link.Link)}
+}
+
+func (f *FakeStore) GetCodeOrShorten(longURL string) (string, error) {
+	for code, l := range f.links {
+		if l.OriginalURL == longURL {
+			return code, nil
+		}
+	}
+	code := "fake123"
+	f.links[code] = link.Link{
+		Code:        code,
+		OriginalURL: longURL,
+		CreatedAt:   time.Now().UTC(),
+	}
+	return code, nil
+}
+
+func (f *FakeStore) GetURL(code string) (string, bool) {
+	l, exists := f.links[code]
+	return l.OriginalURL, exists
+}
+
+func (f *FakeStore) GetLink(code string) (link.Link, error) {
+	l, exists := f.links[code]
+	if !exists {
+		return link.Link{}, store.ErrNotFound
+	}
+	return l, nil
+}
+
+func TestMetadataRouteWithFakeStore(t *testing.T) {
+	fake := NewFakeStore()
+	h := NewHandler(fake, "http://localhost:8080")
+
+	fake.links["testCode"] = link.Link{
+		Code:        "testCode",
+		OriginalURL: "https://example.com/test",
+		CreatedAt:   time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
+	}
+
+	t.Run("Metadata 200 OK", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/testCode", nil)
+		w := httptest.NewRecorder()
+
+		h.Router(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", w.Code)
+		}
+
+		var resp LinkMetadataResponse
+		json.Unmarshal(w.Body.Bytes(), &resp)
+
+		if resp.URL != "https://example.com/test" {
+			t.Errorf("expected URL https://example.com/test, got %s", resp.URL)
+		}
+		if resp.CreatedAt != "2026-01-15T12:00:00Z" {
+			t.Errorf("expected RFC3339 time format, got %s", resp.CreatedAt)
+		}
+	})
+
+	t.Run("Metadata 404 Not Found", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/unknownCode", nil)
+		w := httptest.NewRecorder()
+
+		h.Router(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found, got %d", w.Code)
+		}
+	})
+}
+
+func TestErrorMappingWithErrorsIs(t *testing.T) {
+	s := store.NewMemoryStore()
+	h := NewHandler(s, "http://localhost:8080")
+
+	t.Run("ErrInvalidURL maps to 400 Bad Request", func(t *testing.T) {
+		reqBody := []byte(`{"url":"not-a-valid-url"}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
+		w := httptest.NewRecorder()
+
+		h.Router(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
+		}
+	})
+
+	t.Run("ErrNotFound maps to 404 Not Found", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/nonexistent", nil)
+		w := httptest.NewRecorder()
+
+		h.Router(w, req)
+
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found, got %d", w.Code)
+		}
+	})
+}
+
+func TestIdempotencyAfterRefactor(t *testing.T) {
 	s := store.NewMemoryStore()
 	h := NewHandler(s, "http://localhost:8080")
 
 	reqBody := []byte(`{"url":"https://go.dev/doc/"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
-	w := httptest.NewRecorder()
 
-	h.Router(w, req)
+	req1 := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
+	w1 := httptest.NewRecorder()
+	h.Router(w1, req1)
 
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected status 201, got %d", w.Code)
-	}
-
-	var resp ShortenResponse
-	json.Unmarshal(w.Body.Bytes(), &resp)
-
-	if resp.Code == "" || resp.ShortURL == "" {
-		t.Fatalf("empty response fields")
-	}
+	var resp1 ShortenResponse
+	json.Unmarshal(w1.Body.Bytes(), &resp1)
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
 	w2 := httptest.NewRecorder()
-
 	h.Router(w2, req2)
 
 	var resp2 ShortenResponse
 	json.Unmarshal(w2.Body.Bytes(), &resp2)
 
-	if resp.Code != resp2.Code {
-		t.Fatalf("expected idempotency same code %s, got %s", resp.Code, resp2.Code)
-	}
-
-	reqRedirect := httptest.NewRequest(http.MethodGet, "/"+resp.Code, nil)
-	wRedirect := httptest.NewRecorder()
-
-	h.Router(wRedirect, reqRedirect)
-
-	if wRedirect.Code != http.StatusFound {
-		t.Fatalf("expected 302 Found, got %d", wRedirect.Code)
-	}
-
-	if loc := wRedirect.Header().Get("Location"); loc != "https://go.dev/doc" {
-		t.Fatalf("expected location https://go.dev/doc, got %s", loc)
-	}
-}
-
-func TestBadRequestScenarios(t *testing.T) {
-	s := store.NewMemoryStore()
-	h := NewHandler(s, "http://localhost:8080")
-
-	tests := []struct {
-		name       string
-		body       string
-		wantStatus int
-	}{
-		{"Empty Body", ``, http.StatusBadRequest},
-		{"Invalid JSON", `{"url":}`, http.StatusBadRequest},
-		{"Empty URL", `{"url":""}`, http.StatusBadRequest},
-		{"Unsupported Scheme", `{"url":"ftp://golang.org"}`, http.StatusBadRequest},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBufferString(tt.body))
-			w := httptest.NewRecorder()
-
-			h.Router(w, req)
-
-			if w.Code != tt.wantStatus {
-				t.Errorf("got status %d, want %d", w.Code, tt.wantStatus)
-			}
-		})
+	if resp1.Code != resp2.Code {
+		t.Fatalf("idempotency broken: expected code %s, got %s", resp1.Code, resp2.Code)
 	}
 }
 

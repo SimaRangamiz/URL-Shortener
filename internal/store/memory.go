@@ -58,7 +58,7 @@ func (s *MemoryStore) GetLink(code string) (link.Link, error) {
 
 	l, exists := s.codeToURL[code]
 	if !exists {
-		return link.Link{}, ErrNotFound
+		return link.Link{}, fmt.Errorf("store lookup: %w", ErrNotFound)
 	}
 	return l, nil
 }

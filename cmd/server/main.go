@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"url-shortener/internal/handler"
 	"url-shortener/internal/store"
@@ -20,8 +21,16 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.Router)
 
+	srv := &http.Server{
+		Addr:         *addr,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,  
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second, 
+	}
+
 	log.Printf("Server starting on %s (Base URL: %s)...", *addr, *baseURL)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }

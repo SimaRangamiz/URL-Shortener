@@ -3,7 +3,7 @@ package link
 import "time"
 
 type Link struct {
-	OriginalURL string    `json:"url"`
-	Code        string    `json:"code"`
-	CreatedAt   time.Time `json:"created_at"`
+	Code        string    `json:"code" gorm:"primaryKey;type:varchar(10)"`
+	OriginalURL string    `json:"url" gorm:"index;type:text;not null"`
+	CreatedAt   time.Time `json:"created_at" gorm:"autoCreateTime"`
 }

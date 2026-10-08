@@ -49,9 +49,16 @@ func (f *FakeStore) GetLink(code string) (link.Link, error) {
 	return l, nil
 }
 
-func TestMetadataRouteWithFakeStore(t *testing.T) {
+func setupTestMux(h *Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	return mux
+}
+
+func TestMetadataRoute(t *testing.T) {
 	fake := NewFakeStore()
 	h := NewHandler(fake, "http://localhost:8080")
+	mux := setupTestMux(h)
 
 	fake.links["testCode"] = link.Link{
 		Code:        "testCode",
@@ -63,14 +70,14 @@ func TestMetadataRouteWithFakeStore(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/testCode", nil)
 		w := httptest.NewRecorder()
 
-		h.Router(w, req)
+		mux.ServeHTTP(w, req)
 
 		if w.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d", w.Code)
 		}
 
 		var resp LinkMetadataResponse
-		json.Unmarshal(w.Body.Bytes(), &resp)
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 
 		if resp.URL != "https://example.com/test" {
 			t.Errorf("expected URL https://example.com/test, got %s", resp.URL)
@@ -84,7 +91,7 @@ func TestMetadataRouteWithFakeStore(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/unknownCode", nil)
 		w := httptest.NewRecorder()
 
-		h.Router(w, req)
+		mux.ServeHTTP(w, req)
 
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("expected 404 Not Found, got %d", w.Code)
@@ -92,16 +99,17 @@ func TestMetadataRouteWithFakeStore(t *testing.T) {
 	})
 }
 
-func TestErrorMappingWithErrorsIs(t *testing.T) {
+func TestErrorMapping(t *testing.T) {
 	s := store.NewMemoryStore()
 	h := NewHandler(s, "http://localhost:8080")
+	mux := setupTestMux(h)
 
 	t.Run("ErrInvalidURL maps to 400 Bad Request", func(t *testing.T) {
 		reqBody := []byte(`{"url":"not-a-valid-url"}`)
 		req := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
 		w := httptest.NewRecorder()
 
-		h.Router(w, req)
+		mux.ServeHTTP(w, req)
 
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("expected 400 Bad Request, got %d", w.Code)
@@ -112,7 +120,7 @@ func TestErrorMappingWithErrorsIs(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/links/nonexistent", nil)
 		w := httptest.NewRecorder()
 
-		h.Router(w, req)
+		mux.ServeHTTP(w, req)
 
 		if w.Code != http.StatusNotFound {
 			t.Fatalf("expected 404 Not Found, got %d", w.Code)
@@ -120,25 +128,26 @@ func TestErrorMappingWithErrorsIs(t *testing.T) {
 	})
 }
 
-func TestIdempotencyAfterRefactor(t *testing.T) {
+func TestIdempotency(t *testing.T) {
 	s := store.NewMemoryStore()
 	h := NewHandler(s, "http://localhost:8080")
+	mux := setupTestMux(h)
 
 	reqBody := []byte(`{"url":"https://go.dev/doc/"}`)
 
 	req1 := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
 	w1 := httptest.NewRecorder()
-	h.Router(w1, req1)
+	mux.ServeHTTP(w1, req1)
 
 	var resp1 ShortenResponse
-	json.Unmarshal(w1.Body.Bytes(), &resp1)
+	_ = json.Unmarshal(w1.Body.Bytes(), &resp1)
 
 	req2 := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
 	w2 := httptest.NewRecorder()
-	h.Router(w2, req2)
+	mux.ServeHTTP(w2, req2)
 
 	var resp2 ShortenResponse
-	json.Unmarshal(w2.Body.Bytes(), &resp2)
+	_ = json.Unmarshal(w2.Body.Bytes(), &resp2)
 
 	if resp1.Code != resp2.Code {
 		t.Fatalf("idempotency broken: expected code %s, got %s", resp1.Code, resp2.Code)
@@ -148,6 +157,7 @@ func TestIdempotencyAfterRefactor(t *testing.T) {
 func TestConcurrentSameURL(t *testing.T) {
 	s := store.NewMemoryStore()
 	h := NewHandler(s, "http://localhost:8080")
+	mux := setupTestMux(h)
 
 	const goroutines = 50
 	var wg sync.WaitGroup
@@ -161,10 +171,10 @@ func TestConcurrentSameURL(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/shorten", bytes.NewBuffer(reqBody))
 			w := httptest.NewRecorder()
 
-			h.Router(w, req)
+			mux.ServeHTTP(w, req)
 
 			var resp ShortenResponse
-			json.Unmarshal(w.Body.Bytes(), &resp)
+			_ = json.Unmarshal(w.Body.Bytes(), &resp)
 			codes[idx] = resp.Code
 		}(i)
 	}
@@ -176,5 +186,28 @@ func TestConcurrentSameURL(t *testing.T) {
 		if c != firstCode {
 			t.Fatalf("expected all codes to be %s, but got %s", firstCode, c)
 		}
+	}
+}
+
+func TestRedirectSuccess(t *testing.T) {
+	fake := NewFakeStore()
+	h := NewHandler(fake, "http://localhost:8080")
+	mux := setupTestMux(h)
+
+	fake.links["abc123"] = link.Link{
+		Code:        "abc123",
+		OriginalURL: "https://go.dev/doc/",
+		CreatedAt:   time.Now().UTC(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/abc123", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected 302 Found, got %d", w.Code)
+	}
+	if w.Header().Get("Location") != "https://go.dev/doc/" {
+		t.Fatalf("expected Location header https://go.dev/doc/, got %s", w.Header().Get("Location"))
 	}
 }

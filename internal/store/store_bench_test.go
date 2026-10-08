@@ -7,7 +7,7 @@ import (
 
 func BenchmarkGetCodeOrShorten(b *testing.B) {
 	s := NewMemoryStore()
-	
+
 	b.ReportAllocs()
 
 	for i := 0; b.Loop(); i++ {
@@ -20,10 +20,9 @@ func BenchmarkGetURL(b *testing.B) {
 	s := NewMemoryStore()
 	code, _ := s.GetCodeOrShorten("https://go.dev/doc/")
 
-	
 	b.ReportAllocs()
 
 	for b.Loop() {
-        _, _ = s.GetURL(code)
-    }
+		_, _ = s.GetURL(code)
+	}
 }
